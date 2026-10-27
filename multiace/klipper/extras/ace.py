@@ -1343,6 +1343,18 @@ class MultiAce:
         self._v2_extra_usb_ids = self._parse_v2_extra_usb_ids(
             config.get('v2_extra_usb_ids', ''))
         AceProtocolV2.EXTRA_USB_IDS = self._v2_extra_usb_ids
+        # Opt-in: explicit serial paths (globs allowed) used INSTEAD of the
+        # ACE 2 USB auto-detection, e.g. the per-unit virtual ports of a
+        # daisy-chain bridge:  v2_serial_paths: /tmp/ace-bridge/ace[0-9]*
+        # Read unconditionally (Klipper requires every present option to be
+        # accessed).
+        self._v2_serial_paths = tuple(
+            p for p in config.get('v2_serial_paths', '').replace(',', ' ')
+            .split() if p)
+        AceProtocolV2.SERIAL_PATHS = self._v2_serial_paths
+        if self._v2_serial_paths:
+            logging.info('[multiACE] V2 serial paths (opt-in, USB scan '
+                         'skipped): %s' % ', '.join(self._v2_serial_paths))
         self._v2_probe_generic_usb = config.getboolean(
             'v2_probe_generic_usb', False)
         self._v2_generic_probe_cursor = None
@@ -2594,7 +2606,8 @@ class MultiAce:
                         real_dev = os.path.basename(real_path)
                         usb_ids = AceProtocolV2._read_usb_ids(real_dev)
                         explicitly_configured = (
-                            usb_ids in self._v2_extra_usb_ids)
+                            usb_ids in self._v2_extra_usb_ids
+                            or bool(self._v2_serial_paths))
                         if not (official or explicitly_configured) and (
                                 not self._v2_probe_generic_usb
                                 or not self._probe_v2_generic_candidate(
@@ -2607,6 +2620,7 @@ class MultiAce:
                     path, real_dev, protocol_cls.NAME))
 
         if (self._enable_ace_v2 and self._v2_probe_generic_usb
+                and not self._v2_serial_paths
                 and self._is_printer_idle_for_generic_probe()):
             known_paths = set(discovered_by_protocol.get(
                 AceProtocolV1, ()))
