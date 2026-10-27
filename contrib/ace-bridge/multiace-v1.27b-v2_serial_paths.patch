@@ -1,0 +1,67 @@
+diff -ru a/multiace/klipper/extras/ace.py b/multiace/klipper/extras/ace.py
+--- a/multiace/klipper/extras/ace.py	2026-10-27 22:45:10.836898078 +0000
++++ b/multiace/klipper/extras/ace.py	2026-10-27 22:45:10.840898109 +0000
+@@ -1329,6 +1329,16 @@
+         if self._v2_extra_usb_ids:
+             logging.info('[multiACE] V2 extra USB IDs (opt-in): %s' % (
+                 ', '.join('%s:%s' % p for p in self._v2_extra_usb_ids)))
++        # Opt-in: explicit serial paths (globs allowed) used INSTEAD of the
++        # ACE 2 USB auto-detection, e.g. ace-bridge's per-unit virtual ports
++        # for daisy-chained units: v2_serial_paths: /tmp/ace-bridge/ace[0-9]*
++        self._v2_serial_paths = tuple(
++            p for p in config.get('v2_serial_paths', '').replace(',', ' ')
++            .split() if p)
++        AceProtocolV2.SERIAL_PATHS = self._v2_serial_paths
++        if self._v2_serial_paths:
++            logging.info('[multiACE] V2 serial paths (opt-in, USB scan '
++                         'skipped): %s' % ', '.join(self._v2_serial_paths))
+ 
+         # V2 print-time feed-assist mode:
+         #   'constant' (default) - on extrusion just keep the ACE feed
+diff -ru a/multiace/klipper/extras/ace_protocol_v2.py b/multiace/klipper/extras/ace_protocol_v2.py
+--- a/multiace/klipper/extras/ace_protocol_v2.py	2026-10-27 22:45:10.836898078 +0000
++++ b/multiace/klipper/extras/ace_protocol_v2.py	2026-10-27 22:45:10.840898109 +0000
+@@ -1,3 +1,4 @@
++import glob
+ import json
+ import logging
+ import os
+@@ -194,6 +195,12 @@
+     # Anycubic CH343 cable (1a86:55d3). Empty by default - the strict
+     # 55d3 match stays the default so unrelated CH340 devices are ignored.
+     EXTRA_USB_IDS = ()
++    # Opt-in explicit serial paths (glob patterns allowed), set from ace.py
++    # from the [ace] v2_serial_paths option. When set, ACE 2 units are taken
++    # ONLY from these paths and the USB auto-detection is skipped - for ports
++    # that have no USB IDs, e.g. the per-unit virtual ports of ace-bridge
++    # (several daisy-chained ACE 2 units on one cable). Empty by default.
++    SERIAL_PATHS = ()
+     SERIAL_KWARGS = {
+         'timeout': 0.1,
+     }
+@@ -217,10 +224,24 @@
+ 
+     @classmethod
+     def discover(cls):
+-
++        if cls.SERIAL_PATHS:
++            return cls._configured_serial_paths()
+         return cls._scan_v2_serial_paths()
+ 
+     @classmethod
++    def _configured_serial_paths(cls):
++        paths = []
++        for pattern in cls.SERIAL_PATHS:
++            if any(c in pattern for c in '*?['):
++                hits = sorted(glob.glob(pattern))
++            else:
++                hits = [pattern]
++            for path in hits:
++                if os.path.exists(path) and path not in paths:
++                    paths.append(path)
++        return paths
++
++    @classmethod
+     def open_transport(cls, path, baud, **kwargs):
+ 
+         import serial
