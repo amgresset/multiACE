@@ -228,6 +228,12 @@ class AceProtocolV2(AceProtocol):
     # Anycubic CH343 cable (1a86:55d3). Empty by default - the strict
     # 55d3 match stays the default so unrelated CH340 devices are ignored.
     EXTRA_USB_IDS = ()
+    # Opt-in explicit serial paths (glob patterns allowed), set from ace.py
+    # from the [ace] v2_serial_paths option. When set, ACE 2 units are taken
+    # ONLY from these paths and the USB auto-detection is skipped - for ports
+    # that have no USB IDs, e.g. per-unit virtual ports of a bridge that
+    # drives several daisy-chained ACE 2 units over one cable. Empty by default.
+    SERIAL_PATHS = ()
     SERIAL_KWARGS = {
         'timeout': 0.1,
     }
@@ -251,8 +257,22 @@ class AceProtocolV2(AceProtocol):
 
     @classmethod
     def discover(cls):
-
+        if cls.SERIAL_PATHS:
+            return cls._configured_serial_paths()
         return cls._scan_v2_serial_paths()
+
+    @classmethod
+    def _configured_serial_paths(cls):
+        paths = []
+        for pattern in cls.SERIAL_PATHS:
+            if any(c in pattern for c in '*?['):
+                hits = sorted(glob.glob(pattern))
+            else:
+                hits = [pattern]
+            for path in hits:
+                if os.path.exists(path) and path not in paths:
+                    paths.append(path)
+        return paths
 
     @classmethod
     def discover_usb_serial_candidates(cls):
