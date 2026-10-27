@@ -1364,10 +1364,11 @@ async def preflight(file: UploadFile = File(...)) -> dict:
     del data
 
     pp = _load_post_processor()
+    _ensure_swap_cost()
 
     with open(src_path, "r", encoding="utf-8", errors="replace") as f:
-        slicer_colors, slicer_types, num_aces, _used, plan_proxy, meta = \
-            preflight_core.parse_meta(pp, f)
+        (slicer_colors, slicer_types, num_aces, _used, plan_proxy, meta,
+         header_text) = preflight_core.parse_meta(pp, f, with_header=True)
 
     live_slots = await _live_slots_async()
     if not live_slots:
@@ -1383,7 +1384,8 @@ async def preflight(file: UploadFile = File(...)) -> dict:
             pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
             num_aces=num_aces, plan_proxy=plan_proxy, live_slots=live_slots,
             head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
-            fuzzy=_PREFLIGHT_FUZZY, meta=meta)
+            fuzzy=_PREFLIGHT_FUZZY, meta=meta, header_text=header_text,
+            cost_params=_swap_cost_params())
     except ValueError as e:
         # e.g. an already-processed file (re-processing scrambles the swaps):
         # a user error with a clear fix, not a server fault.
@@ -1730,11 +1732,18 @@ async def preflight_pysrc() -> dict:
     if not core_src.is_file():
         raise HTTPException(status_code=503,
                             detail="preflight_core not installed")
+    cost_src = _swap_cost_path()
     try:
-        return {
+        out = {
             "postprocess": pp_src.read_text(encoding="utf-8"),
             "core":        core_src.read_text(encoding="utf-8"),
         }
+        # swap_cost is optional on purpose: an install that predates it still
+        # gets a working preflight, just without the estimate. Adding a
+        # module here means adding it to the worker's init too.
+        if cost_src is not None:
+            out["swap_cost"] = cost_src.read_text(encoding="utf-8")
+        return out
     except Exception as exc:
         raise HTTPException(status_code=503,
                             detail=f"cannot read sources: {exc}")
@@ -1750,6 +1759,9 @@ async def preflight_livedata() -> dict:
     return {
         "live_slots": live_slots,
         "head_ctx":   head_ctx,
+        # The estimate's inputs, read fresh from ace.cfg on every run: the
+        # worker outlives many preflights in one tab.
+        "cost_params": _swap_cost_params(),
     }
 
 _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}
@@ -4557,6 +4569,97 @@ def _extract_params(text: str) -> tuple[dict[str, str], dict[int, dict[str, str]
         else:
             per_ace.setdefault(section, {})[key] = val
     return main, per_ace
+
+def _swap_cost_path() -> Optional[Path]:
+    """swap_cost.py, looked up like job_history.py: next to main.py first
+    (where the installer puts it on the printer), then <config>/tools, then
+    the checkout's multiace/tools."""
+    here = Path(__file__).resolve().parent
+    for cand in (here / "swap_cost.py",
+                 Path(_CFG_DIR) / "tools" / "swap_cost.py",
+                 here.parent.parent / "tools" / "swap_cost.py"):
+        if cand.is_file():
+            return cand
+    return None
+
+def _ensure_swap_cost() -> None:
+    """Hand preflight_core the cost model when its own imports found none.
+    Without it a preflight still works, it just has no estimate."""
+    if preflight_core._swap_cost is None:
+        path = _swap_cost_path()
+        if path is not None:
+            preflight_core.load_swap_cost(path)
+
+#: ace.cfg scalars the swap cost model reads: the lengths and speeds it can
+#: compute from, plus the purge policy values. The terms it cannot compute
+#: stay named constants in swap_cost.UNMEASURED_S.
+_SWAP_COST_KEYS = (
+    "feed_speed", "retract_speed", "load_length", "retract_length",
+    "swap_retract_length", "seat_overshoot_length", "swap_anti_ooze_retract",
+    "swap_purge_length", "swap_purge_min", "swap_purge_max",
+    "filament_diameter",
+)
+_BG_LOAD_ENABLED_RE = re.compile(
+    r"^\s*load_enabled\s*:\s*(\S+)", re.IGNORECASE)
+
+def _as_float(value):
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+def _read_bg_load_mode(text: str) -> str:
+    """[ace_bg_swap] load_enabled as "true" (full background swap, the
+    default), "transport" (the load stages at the toolhead sensor) or
+    "false" (background unload only). In the last two the arrival loads
+    inline with the full flush."""
+    in_section = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_section = s[1:-1].strip() == "ace_bg_swap"
+            continue
+        if in_section:
+            m = _BG_LOAD_ENABLED_RE.match(raw)
+            if m:
+                v = m.group(1).strip().lower()
+                if v in ("1", "true", "yes", "on"):
+                    return "true"
+                return "transport" if v == "transport" else "false"
+    return "true"
+
+def _swap_cost_params() -> dict:
+    """The cost model's inputs, straight out of [ace] / [ace N].
+
+    A user who lengthens their bowden gets a longer estimate without
+    touching any code: the mechanical terms come from the config, not from
+    hardcoded numbers.
+    """
+    try:
+        text = Path(MULTIACE_CFG_PATH).read_text(encoding="utf-8")
+        main, per_ace = _extract_params(text)
+    except Exception:
+        return {"main": {}, "per_ace": {}}
+    out: dict = {}
+    for key in _SWAP_COST_KEYS:
+        v = _as_float(main.get(key))
+        if v is not None:
+            out[key] = v
+    raw = str(main.get("purge_matrix", "")).strip().lower()
+    if raw:
+        out["purge_matrix"] = raw in ("1", "true", "yes", "on")
+    out["bg_load"] = _read_bg_load_mode(text)
+    per: dict = {}
+    for ace_idx, section in (per_ace or {}).items():
+        vals = {}
+        for key, raw in section.items():
+            v = _as_float(raw)
+            if v is not None and (key in _SWAP_COST_KEYS
+                                  or key.rsplit("_", 1)[0] in _SWAP_COST_KEYS):
+                vals[key] = v
+        if vals:
+            per[int(ace_idx)] = vals
+    return {"main": out, "per_ace": per}
 
 _TIPFORM_SECTION_RE = re.compile(r"^\[\s*ace_tipform\s*\]\s*$")
 _TIPFORM_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_\-]*)\s*:\s*(.*)$")
