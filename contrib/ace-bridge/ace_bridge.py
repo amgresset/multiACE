@@ -51,7 +51,7 @@ import termios
 import time
 import tty
 
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 
 PREAMBLE = b'\xff\xaa'
 END = 0xFE
@@ -71,10 +71,11 @@ BLOCKED_CMDS = {CMD_ASSIGN, CMD_IAP_UPGRADE, CMD_IAP_FIRMWARE, CMD_IAP_FINISH}
 ADDR_EXPIRY_S = 3.5      # measured by tobecwb
 KEEPALIVE_S = 1.0        # touch every unit at least this often
 REPLY_TIMEOUT_S = 1.0    # wait for one host reply
-KEEPALIVE_TIMEOUT_S = 0.2  # replies come in <45 ms; keep the bus free
+KEEPALIVE_TIMEOUT_S = 0.5  # replies normally <45 ms; real units are
+                           # occasionally slower - 0.2 s caused false 'lost'
 DISCOVER_WAIT_S = 0.20   # collect all broadcast replies (they arrive <45 ms)
 RESCAN_S = 5.0           # look for rebooted / newly powered units
-LOST_AFTER_FAILS = 2     # consecutive missed replies -> unit considered lost
+LOST_AFTER_FAILS = 3     # consecutive missed replies -> unit considered lost
 MAX_UNITS_PER_BUS = 4
 INTERNAL_SEQ_BASE = 0xF000  # seq range for the bridge's own frames
 
@@ -312,6 +313,7 @@ class Unit:
         self.present = False
         self.last_tx = 0.0
         self.fails = 0
+        self.lost_since = 0.0
 
 
 class Bus:
@@ -490,6 +492,9 @@ class Bus:
                          'will re-enumerate', self.path)
                 self.last_scan = 0.0
             return
+        if not unit.present:
+            log.info('%s (%s): answering again at address %d', unit.port.name,
+                     unit.uid, unit.addr)
         unit.fails = 0
         unit.present = True
         if inf and inf['unit'] is unit and inf['seq'] == f['seq']:
@@ -512,8 +517,10 @@ class Bus:
             unit = inf['unit']
             unit.fails += 1
             self.inflight = None
+            log.debug('%s: no reply (miss %d)', unit.port.name, unit.fails)
             if unit.fails >= LOST_AFTER_FAILS and unit.present:
                 unit.present = False
+                unit.lost_since = now
                 log.warning('%s (%s): no reply %d times - marked lost, '
                             'rescanning', unit.port.name, unit.uid, unit.fails)
                 self.last_scan = 0.0
@@ -531,7 +538,14 @@ class Bus:
             self._send(unit, frame, internal)
             return
         for unit in self.units.values():
-            if unit.present and now - unit.last_tx > KEEPALIVE_S:
+            # Present units: keep-alive. Lost units: probe at their known
+            # address - one that only missed a few replies still holds it
+            # and comes straight back, without waiting for the 3.5 s expiry
+            # and a re-assign.
+            interval = KEEPALIVE_S
+            if not unit.present and now - unit.lost_since > 10.0:
+                interval = 5.0     # switched off? do not hog the bus
+            if now - unit.last_tx > interval:
                 seq = self._next_seq()
                 self._send(unit, {'raw': build(0, seq, CMD_GET_INFO),
                                   'seq': seq}, internal=True)

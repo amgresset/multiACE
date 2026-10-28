@@ -5,7 +5,8 @@ Behaviour copied from tobecwb's measurements: units boot at address 0,
 answer DISCOVER with their UID, ACK an ASSIGN on the OLD address, drop back to
 address 0 after 3.5 s without a frame addressed to them, and serialise their
 replies to a broadcast. Writes the slave path to argv[1] and serves forever.
-Send SIGUSR1 to 'reboot' unit 2 (addr -> 0)."""
+Send SIGUSR1 to 'reboot' unit 2 (addr -> 0), SIGUSR2 to make unit 1
+ignore frames for 2 s while keeping its address."""
 
 import os
 import random
@@ -24,6 +25,7 @@ class SimUnit:
     def __init__(self, uid, fw):
         self.uid, self.fw, self.addr, self.last = uid, fw, 0, time.monotonic()
         self.cmds = []
+        self.mute_until = 0.0     # SIGUSR2: ignore frames, keep address
 
     def tick(self):
         if self.addr and time.monotonic() - self.last > 3.5:
@@ -34,6 +36,8 @@ class SimUnit:
         self.tick()
         if f['addr'] != self.addr:
             return None
+        if time.monotonic() < self.mute_until:
+            return None           # busy: no reply, but the address is kept
         self.last = time.monotonic()
         self.cmds.append(f['cmd'])
         reply_addr = 0x80 | self.addr
@@ -61,6 +65,8 @@ def main():
     with open(sys.argv[1], 'w') as fh:
         fh.write(os.ttyname(slave))
     signal.signal(signal.SIGUSR1, lambda *_: setattr(units[1], 'addr', 0))
+    signal.signal(signal.SIGUSR2, lambda *_: setattr(units[0], 'mute_until',
+                                                     time.monotonic() + 2.0))
     parser = FrameParser()
     while True:
         r, _, _ = select.select([master], [], [], 0.05)
