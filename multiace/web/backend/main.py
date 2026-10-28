@@ -976,6 +976,10 @@ class CalibrationAction(BaseModel):
     slot: int | None = None
     head: int | None = None
     scope: str | None = None
+    # verify_start: the values to test (what Save would write)
+    load_budget: int | None = None
+    swap: int | None = None
+    retract: int | None = None
 
 class SnapshotSave(BaseModel):
     name: str
@@ -4424,12 +4428,28 @@ def _raw_calibration(status: dict) -> dict:
     ace = status.get('ace', {}) or {}
     return ace.get('calibration') or {'state': 'idle', 'session_id': 0}
 
+def _moonraker_error_text(detail: str) -> str:
+    """Moonraker answers a failed G-code script with a JSON body that
+    carries the message next to a full traceback; the page only needs the
+    message. Anything that is not that JSON is returned unchanged."""
+    try:
+        body = json.loads(detail)
+    except (TypeError, ValueError):
+        return detail
+    error = body.get('error') if isinstance(body, dict) else None
+    if isinstance(error, dict) and error.get('message'):
+        return str(error['message'])
+    if isinstance(error, str) and error:
+        return error
+    return detail
+
 async def _dispatch_calibration(script: str) -> dict:
     try:
         return await _mr_post('/printer/gcode/script', {'script': script},
                               timeout=30.0)
     except httpx.HTTPStatusError as e:
-        detail = e.response.text if e.response is not None else str(e)
+        detail = _moonraker_error_text(
+            e.response.text if e.response is not None else str(e))
         raise HTTPException(
             status_code=e.response.status_code if e.response is not None else 502,
             detail=detail)
@@ -4472,16 +4492,29 @@ async def calibration_action(payload: CalibrationAction) -> dict:
         script = 'ACE_CALIBRATION_FEED'
     elif action == 'retract':
         length = int(payload.length or 0)
-        if length < 5 or length > 500:
-            raise HTTPException(400, 'retract length must be 5-500 mm')
+        if length < 5 or length > 5000:
+            raise HTTPException(400, 'retract length must be 5-5000 mm')
         script = 'ACE_CALIBRATION_RETRACT LENGTH=%d' % length
     elif action == 'feed_jog':
         length = int(payload.length or 0)
-        if length < 5 or length > 500:
-            raise HTTPException(400, 'forward jog length must be 5-500 mm')
+        if length < 5 or length > 5000:
+            raise HTTPException(400, 'forward jog length must be 5-5000 mm')
         script = 'ACE_CALIBRATION_FEED_JOG LENGTH=%d' % length
     elif action == 'mark_swap':
         script = 'ACE_CALIBRATION_MARK MARK=swap'
+    elif action == 'mark_undo':
+        script = 'ACE_CALIBRATION_MARK MARK=undo'
+    elif action == 'stop':
+        script = 'ACE_CALIBRATION_STOP'
+    elif action == 'resume':
+        script = 'ACE_CALIBRATION_RESUME'
+    elif action == 'home':
+        script = 'ACE_CALIBRATION_HOME'
+    elif action == 'verify_hub_jog':
+        length = int(payload.length or 0)
+        if length not in (5, 10, 25, 50):
+            raise HTTPException(400, 'hub jog must be 5, 10, 25 or 50 mm')
+        script = 'ACE_CALIBRATION_VERIFY ACTION=hub_jog LENGTH=%d' % length
     elif action == 'return_park':
         script = 'ACE_CALIBRATION_RETURN'
     elif action == 'verify_start':
@@ -4497,6 +4530,10 @@ async def calibration_action(payload: CalibrationAction) -> dict:
                 raise HTTPException(400, 'scope must be ace or slot')
             script += ' ACE=%d SLOT=%d HEAD=%d SCOPE=%s' % (
                 payload.ace, payload.slot, payload.head, scope)
+        values = (payload.load_budget, payload.swap, payload.retract)
+        if all(value is not None for value in values):
+            script += ' LOAD=%d SWAP=%d RETRACT=%d' % tuple(
+                int(value) for value in values)
     elif action == 'verify_continue':
         script = 'ACE_CALIBRATION_VERIFY ACTION=continue'
     elif action == 'verify_pause':
@@ -4856,7 +4893,29 @@ def _write_cfg_atomic(path, text: str) -> None:
     p = Path(path)
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
+    _klipper_readable(tmp)
     os.replace(str(tmp), str(p))
+
+
+def _klipper_readable(path) -> None:
+    """Make a file this service wrote readable by Klipper before it replaces
+    the real one. The service runs as root: with a strict umask (e.g. 0077,
+    inherited from an SSH shell that restarted it) the new file came out
+    root-owned 0600 and Klipper, running as the printer user, failed with
+    "Unable to open config file". Readable by all, owned like its directory
+    when running as root. Best-effort."""
+    p = Path(path)
+    try:
+        os.chmod(str(p), 0o644)
+    except OSError:
+        pass
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and geteuid() == 0:
+        try:
+            owner = p.parent.stat()
+            os.chown(str(p), owner.st_uid, owner.st_gid)
+        except OSError:
+            pass
 
 @app.get("/api/config")
 async def get_config() -> dict:
@@ -5305,6 +5364,7 @@ def _save_overrides_to_disk() -> None:
     try:
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(json.dumps(_slot_overrides, indent=2), encoding="utf-8")
+        _klipper_readable(tmp)
         os.replace(str(tmp), str(p))
         try:
             _overrides_mtime = p.stat().st_mtime
