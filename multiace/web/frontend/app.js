@@ -8254,7 +8254,7 @@ createApp({
     // =================================================================
     const history = reactive({
       loaded: false, busy: false, error: "", jobs: [], detail: null,
-      reprinting: "", stats: [], minSamples: 5,
+      reprinting: "", stats: [], minSamples: 5, info: null,
     });
     async function loadHistory() {
       history.busy = true;
@@ -8296,13 +8296,22 @@ createApp({
       const key = historyRowKey(row);
       history.detail = history.detail === key ? null : key;
     }
-    function historyColors(row) {
+    // A head's entry is one slot (older records) or a list of every slot that
+    // fed it during the print; both come out as a list.
+    function historyLoadout(row) {
       const asn = (row && row.multiace && row.multiace.assignment) || {};
-      return Object.keys(asn).map(h => ({
-        head: h, ace: asn[h].ace_index, slot: asn[h].slot,
-        color: asn[h].color ? ("#" + String(asn[h].color).replace(/^#/, ""))
-                            : "#666",
-      }));
+      return Object.keys(asn).sort((a, b) => Number(a) - Number(b)).map(h => {
+        const v = asn[h];
+        return {head: h, slots: (Array.isArray(v) ? v : [v]).filter(Boolean).map(e => ({
+          ace: e.ace_index, slot: e.slot,
+          color: e.color ? ("#" + String(e.color).replace(/^#/, "")) : "#666",
+        }))};
+      });
+    }
+    function historyColors(row) {
+      return historyLoadout(row).flatMap(l => l.slots.map((s, i) => ({
+        head: l.head + "-" + i, th: l.head, ace: s.ace, slot: s.slot, color: s.color,
+      })));
     }
     function fmtDuration(sec) {
       if (!sec || sec < 0) return "–";
@@ -8313,16 +8322,61 @@ createApp({
     }
     // Reprint: start the file exactly as it already sits on the printer, with
     // no preflight and no rewrite. The swaps baked in from its first run
-    // still apply; a loadout that has moved on since is the user's call.
+    // still apply, so the user gets to compare the loadout of that run with
+    // what sits on the machine now before confirming.
+    function reprintLoadoutHtml(row) {
+      const loadout = historyLoadout(row).filter(l => l.slots.length);
+      if (!loadout.length) {
+        return `<p class="muted small">${escapeHtml(t("ui.history.reprint_no_record"))}</p>`;
+      }
+      const items = loadout.map(l => {
+        const slots = l.slots.map(e => {
+          const hasAce = e.ace != null && e.slot != null;
+          const where = hasAce
+            ? `ACE ${dispIdx(e.ace)} / ${dispIdx(e.slot)}`
+            : t("ui.history.reprint_feeder");
+          const sp = hasAce ? spoolForSlot(e.ace, e.slot) : spoolForHead(Number(l.head));
+          const now = sp ? t("ui.history.reprint_now", {spool: spoolTitle(sp)})
+                         : t("ui.history.reprint_now_empty");
+          return `<span class="swatch" style="background:${escapeHtml(e.color)}"></span> ` +
+                 `${escapeHtml(where)} <span class="muted small">(${escapeHtml(now)})</span>`;
+        });
+        return `<li><b>T${escapeHtml(dispIdx(Number(l.head)))}</b> · ${slots.join(" → ")}</li>`;
+      });
+      return `<ul class="reprint-loadout">${items.join("")}</ul>`;
+    }
     function reprintJob(row) {
       if (!row || !row.filename || history.reprinting) return;
       confirm({
         title: t("ui.history.reprint_title"),
-        message: t("ui.history.reprint_msg", {name: row.filename}),
+        message: `<p><b>${escapeHtml(row.filename)}</b></p>` +
+                 `<p>${escapeHtml(t("ui.history.reprint_msg"))}</p>` +
+                 reprintLoadoutHtml(row) +
+                 `<p class="muted small">${escapeHtml(t("ui.history.reprint_note"))}</p>` +
+                 `<p>${escapeHtml(t("ui.history.reprint_confirm_q"))}</p>`,
         okLabel: t("ui.history.reprint_ok"),
         onOk: () => doReprint(row),
       });
     }
+    // Column header "i" button: a banner next to the header. Click toggles
+    // it (hover tooltips do not exist on touch); a click elsewhere, Escape or
+    // scrolling closes it. Fixed-position so the table's scroll box cannot
+    // clip it.
+    function historyColumnInfo(col, ev) {
+      if (history.info && history.info.col === col) { history.info = null; return; }
+      const r = ev.currentTarget.getBoundingClientRect();
+      const w = 260;
+      history.info = {
+        col,
+        left: Math.max(8, Math.min(r.left, window.innerWidth - w - 8)),
+        top: r.bottom + 6,
+      };
+    }
+    const closeHistoryInfo = () => { history.info = null; };
+    document.addEventListener("click", closeHistoryInfo);
+    const historyInfoKeydown = (e) => { if (e.key === "Escape") closeHistoryInfo(); };
+    document.addEventListener("keydown", historyInfoKeydown);
+    window.addEventListener("scroll", closeHistoryInfo, true);
     async function doReprint(row) {
       history.reprinting = historyRowKey(row);
       history.error = "";
@@ -8345,6 +8399,9 @@ createApp({
     if (tab.value === "history") loadHistory();
 
     onUnmounted(() => {
+      document.removeEventListener("click", closeHistoryInfo);
+      document.removeEventListener("keydown", historyInfoKeydown);
+      window.removeEventListener("scroll", closeHistoryInfo, true);
       clearTimeout(wsReconnectTimer);
       clearInterval(screenTimer);
       try { ws?.close(); } catch (_) {}
@@ -8354,7 +8411,7 @@ createApp({
     });
     return {
       history, loadHistory, openHistoryDetail, historyRowKey, historyColors,
-      fmtDuration, reprintJob, swapKindLabel,
+      fmtDuration, reprintJob, historyColumnInfo, swapKindLabel,
       subText,
       sourceLabel,
       tab, version, printerName, printerFw, connClass, connText, screenAvailable,

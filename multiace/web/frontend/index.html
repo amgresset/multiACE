@@ -1836,13 +1836,13 @@
         <table class="history-table">
           <thead>
             <tr>
-              <th>{{ t('ui.history.date') }}</th>
-              <th>{{ t('ui.history.file') }}</th>
-              <th>{{ t('ui.history.duration') }}</th>
-              <th>{{ t('ui.history.colors') }}</th>
-              <th>{{ t('ui.history.swaps') }}</th>
-              <th>{{ t('ui.history.filament') }}</th>
-              <th>{{ t('ui.history.result') }}</th>
+              <th>{{ t('ui.history.date') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('date', $event)">i</button></th>
+              <th>{{ t('ui.history.file') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('file', $event)">i</button></th>
+              <th>{{ t('ui.history.duration') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('duration', $event)">i</button></th>
+              <th>{{ t('ui.history.colors') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('colors', $event)">i</button></th>
+              <th>{{ t('ui.history.swaps') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('swaps', $event)">i</button></th>
+              <th>{{ t('ui.history.filament') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('filament', $event)">i</button></th>
+              <th>{{ t('ui.history.result') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('result', $event)">i</button></th>
               <th></th>
             </tr>
           </thead>
@@ -1858,9 +1858,9 @@
                 <td>
                   <span v-for="c in historyColors(row)" :key="'hc-'+c.head"
                         class="swatch" :style="{background: c.color}"
-                        :title="'T' + c.head + ' · ACE ' + c.ace + ' / slot ' + c.slot"></span>
+                        :title="'T' + c.th + ' · ACE ' + c.ace + ' / slot ' + c.slot"></span>
                 </td>
-                <td>{{ row.multiace ? row.multiace.toolchanges : '–' }}</td>
+                <td>{{ row.multiace && row.multiace.toolchanges != null ? row.multiace.toolchanges : '–' }}</td>
                 <td>{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '–' }}</td>
                 <td><span class="pill">{{ row.status || '–' }}</span></td>
                 <td>
@@ -1876,7 +1876,7 @@
               <tr v-if="history.detail === historyRowKey(row)" class="history-detail">
                 <td colspan="8">
                   <div v-if="row.multiace">
-                    <p><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
+                    <p v-if="row.multiace.plan || row.multiace.load_retries != null"><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
                        · <b>{{ t('ui.history.retries') }}:</b> {{ row.multiace.load_retries }}</p>
                     <table class="history-swaps" v-if="(row.multiace.swaps || []).length">
                       <tr v-for="(sw, i) in row.multiace.swaps" :key="'sw-'+i">
@@ -1898,6 +1898,11 @@
             </template>
           </tbody>
         </table>
+      </div>
+      <div v-if="history.info" class="info-banner" role="note" @click.stop
+           :style="{left: history.info.left + 'px', top: history.info.top + 'px'}">
+        <b>{{ t('ui.history.' + history.info.col) }}</b>
+        <div>{{ t('ui.history.' + history.info.col + '_info') }}</div>
       </div>
     </section>
     <section v-show="tab==='spools'" class="nt-spools-tab">
