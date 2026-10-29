@@ -1591,7 +1591,8 @@ BG_INITIAL_LOAD = True
 # 2: standby temperatures that would cool the printing head are dropped
 # instead of remapped (see scan_cooling_standbys). 3: purge stamps sized
 # from the RAW flush matrix. 4: flush_multiplier inherited upward only.
-PP_FORMAT_VERSION = 4
+# 5: stamped ACE_BG_WAIT arrival holds before toolchanges.
+PP_FORMAT_VERSION = 5
 
 def detect_processed(text):
     """(processed: bool, fmt: int|None) for a gcode HEAD chunk or plan
@@ -2005,6 +2006,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
     body_tools, body_times, body_lines = _scan_body_tools(in_path)
     bt_idx = 0
     plan = None
+    bg_waiting_heads = set()
     if copies:
         # bg_heads = the same tie-break the preview simulated with, so the
         # stamped plan is the previewed one.
@@ -2120,6 +2122,10 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         bt_idx += 1
                     last_pr = _emit_progress(progress, seen, total, last_pr)
                     continue
+                if in_body and h in bg_waiting_heads:
+                    fout.write('ACE_BG_WAIT HEAD=%d\n' % h)
+                    bg_waiting_heads.discard(h)
+
                 fout.write('T%d\n' % h)
                 # Background-unload stamp for the head this toolchange just
                 # RELEASED - BEFORE the arrival's own ACE_SWAP_HEAD:
@@ -2202,6 +2208,8 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                            _fmt_anti_ooze(ao),
                                            (' PURGE=%d' % _bgp)
                                            if _bgp is not None else ''))
+                                    bg_waiting_heads.add(ae_rel[0])
+
                     ae = ace_entry_at(bt_idx)
                     bt_idx += 1
                 else:
